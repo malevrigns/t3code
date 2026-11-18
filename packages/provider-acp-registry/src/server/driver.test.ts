@@ -403,16 +403,97 @@ describe("acpRegistrySnapshotReadiness", () => {
       [],
     ).models.map((model) => model.capabilities?.optionDescriptors ?? []);
     expect(advertised).toEqual([
-      [{ ...liveOptions[0]!, role: "reasoning" }],
+      [{ ...liveOptions[0]!, label: "Reasoning", role: "reasoning" }],
       [
         {
           ...liveOptions[0]!,
+          label: "Reasoning",
           role: "reasoning",
           options: [{ id: "low", label: "Low" }],
           currentValue: "low",
         },
       ],
       [],
+    ]);
+  });
+
+  it("keeps each Mistral Vibe model's own thinking levels", () => {
+    const provider = buildCheckedAcpRegistrySnapshot({
+      ...identity,
+      settings: decodeSettings({ agentId: "mistral-vibe" }),
+      checkedAt: "2026-11-18T10:00:00.000Z",
+      inspection: {
+        status: "ready",
+        agentId: "mistral-vibe",
+        version: "3.1.1",
+        distribution: "binary",
+      },
+      probe: {
+        probe: {
+          instanceId: identity.instanceId,
+          ready: true,
+          icon: null,
+          authMethods: [],
+          models: [],
+          currentModelId: null,
+          configOptions: [],
+          sessionManagement: noSessionManagement,
+        },
+        slashCommands: [],
+        skills: [],
+      },
+    });
+    // Mistral Vibe 3.1.1 sends its levels under category "thinking", for the session's model only.
+    const vibeSession = (model: string, levels: ReadonlyArray<string>) =>
+      normalizeAcpRegistryLiveConfiguration([
+        {
+          id: "model",
+          name: "Model",
+          category: "model",
+          type: "select",
+          currentValue: model,
+          options: ["mistral-large-4-0-3", "mistral-medium-3.5"].map((value) => ({
+            value,
+            name: value,
+          })),
+        },
+        {
+          id: "thinking",
+          name: "Thinking",
+          category: "thinking",
+          type: "select",
+          currentValue: "high",
+          options: levels.map((value) => ({ value, name: value })),
+        },
+      ]);
+    const thinking = (levels: ReadonlyArray<string>) => ({
+      id: "thinking",
+      label: "Reasoning",
+      type: "select",
+      options: levels.map((id) => ({ id, label: id[0]!.toUpperCase() + id.slice(1) })),
+      currentValue: "high",
+      role: "reasoning",
+    });
+    const descriptors = (snapshot: typeof provider) =>
+      snapshot.models.map((model) => [model.slug, model.capabilities?.optionDescriptors ?? []]);
+
+    const onLarge = applyAcpRegistryLiveConfiguration(
+      provider,
+      vibeSession("mistral-large-4-0-3", ["low", "medium", "high"]),
+      [],
+    );
+    expect(descriptors(onLarge)).toEqual([
+      ["mistral-large-4-0-3", [thinking(["low", "medium", "high"])]],
+      ["mistral-medium-3.5", []],
+    ]);
+    const onMedium = applyAcpRegistryLiveConfiguration(
+      onLarge,
+      vibeSession("mistral-medium-3.5", ["off", "high"]),
+      [],
+    );
+    expect(descriptors(onMedium)).toEqual([
+      ["mistral-large-4-0-3", [thinking(["low", "medium", "high"])]],
+      ["mistral-medium-3.5", [thinking(["high", "off"])]],
     ]);
   });
 
@@ -883,6 +964,27 @@ const driverLayer = TestProviderHost.layer({ runBackgroundWork: false }).pipe(
 );
 
 it.layer(driverLayer, { excludeTestServices: true })("AcpRegistryDriver", (it) => {
+  it.effect("creates without inspecting the agent, which may fetch the registry", () =>
+    Effect.gen(function* () {
+      const instance = yield* AcpRegistryDriver.create({
+        instanceId: identity.instanceId,
+        displayName: identity.displayName,
+        enabled: true,
+        environment: [],
+        config: decodeSettings({ agentId: "test-agent" }),
+      }).pipe(
+        Effect.provideService(AcpRegistrySupport.AcpRegistryCatalog, {
+          ...catalogWithInspection({ status: "unconfigured" }),
+          inspect: () => Effect.die("inspected during creation"),
+        }),
+      );
+      expect(yield* instance.snapshot.getSnapshot).toMatchObject({
+        installed: false,
+        message: "Checking ACP Registry agent readiness...",
+      });
+    }),
+  );
+
   it.effect("drops cached and session-reported models when its caches are invalidated", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
